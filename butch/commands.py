@@ -14,7 +14,6 @@ from os import (
 from os.path import abspath, exists, isdir, join
 from platform import system, platform
 from shutil import rmtree, move, _basename
-
 from typing import List
 
 from butch.commandtype import CommandType
@@ -504,11 +503,6 @@ def cmd_move(params: list, ctx: Context) -> None:
         ctx.error_level = 1
         ctx.piped = False
         return
-    if PARAM_HELP in params:
-        print_help(cmd=CommandType.MOVE, file=out)
-        return
-    target_par = params[params_len - 1]
-    file_to_abs = abspath(target_par)
 
     # move [<anything> ...] /?
     if PARAM_HELP in params:
