@@ -6,18 +6,23 @@ import ctypes
 from collections import defaultdict
 from datetime import datetime
 from functools import wraps
+from glob import glob
 from locale import LC_CTYPE, LC_NUMERIC, getlocale, setlocale
-from os import environ, getcwd, listdir, makedirs, remove, stat, statvfs
+from os import (
+    environ, getcwd, listdir, makedirs, remove, stat, statvfs, rename
+)
 from os.path import abspath, exists, isdir, join
 from platform import system, platform
-from shutil import rmtree, move
+from shutil import rmtree, move, _basename
+
 from typing import List
 
 from butch.commandtype import CommandType
 from butch.constants import (
     ACCESS_DENIED, DELETE, DIR_INVALID, DIR_NONEMPTY, ENV_VAR_UNDEFINED,
     ERROR_PROCESSING, FILE_NOT_FOUND, PARAM_HELP, PARAM_YES, PATH_EXISTS,
-    PATH_NOT_FOUND, PAUSE_TEXT, SURE, SYNTAX_INCORRECT, ECHO_STATE, OCTAL_CLEAR
+    PATH_NOT_FOUND, PAUSE_TEXT, SURE, SYNTAX_INCORRECT, ECHO_STATE,
+    OCTAL_CLEAR, MULTI_TO_SINGLE
 )
 from butch.context import Context
 from butch.expansion import percent_expansion
@@ -143,6 +148,7 @@ def cmd_type(params: List[Argument], ctx: Context) -> None:
     out = get_output(ctx=ctx)
 
     params = _expand_params(params=params, ctx=ctx)
+    params = [param.replace("\\", "/") for param in params]
     params_len = len(params)
 
     if not params_len:
@@ -489,11 +495,14 @@ def cmd_move(params: list, ctx: Context) -> None:
     out = get_output(ctx=ctx)
     log = ctx.log.debug
     params = _expand_params(params=params, ctx=ctx)
+    params = [param.replace("\\", "/") for param in params]
     params_len = len(params)
 
+    # move
     if not params_len:
-        print(SYNTAX_INCORRECT, file=out)
+        print(SYNTAX_INCORRECT, file=sys.stderr)
         ctx.error_level = 1
+        ctx.piped = False
         return
     if PARAM_HELP in params:
         print_help(cmd=CommandType.MOVE, file=out)
@@ -501,26 +510,85 @@ def cmd_move(params: list, ctx: Context) -> None:
     target_par = params[params_len - 1]
     file_to_abs = abspath(target_par)
 
-    if not isdir(file_to_abs):
-        log("got %r, is not dir", target_par)
-        print(DIR_INVALID)
-        ctx.error_level = 1
+    # move [<anything> ...] /?
+    if PARAM_HELP in params:
+        print_help(cmd=CommandType.MOVE, file=out)
+        ctx.piped = False
         return
 
-    for param in params:
-        file_from_abs = abspath(param)
+    suppress = "/Y" in params or "/y" in params
+    prompt = "/-Y" in params or "/-y" in params
 
-        if not exists(file_from_abs):
-            os_path = file_from_abs.replace("/", "\\")
-            print(f"Could Not Find {os_path}", file=sys.stderr)
+    params = [
+        param for param in params
+        if param not in ("/Y", "/y", "/-Y", "/-y")
+    ]
+    *sources, target = params
+
+    # disable multiple values for source, but allow wildcards
+    if len(sources) > 1:
+        print(SYNTAX_INCORRECT, file=sys.stderr)
+        ctx.error_level = 1
+        ctx.piped = False
+        return
+
+    source = abspath(sources[0])
+    dest_slash = target.endswith("/")
+    dest = abspath(target)
+
+    # move nonexisting [...]
+    if not exists(source) and not all(src for src in glob(source) or [False]):
+        print(FILE_NOT_FOUND, file=sys.stderr)
+        ctx.error_level = 1
+        ctx.piped = False
+        return
+
+    dest_exists = exists(dest)
+    dest_isdir = dest_slash or isdir(dest)
+    # move <anything> nonexisting
+    if not dest_exists:
+        patterns = glob(source)
+        # move <anything> folder\
+        if dest_isdir:
+            print(PATH_NOT_FOUND, file=sys.stderr)
+            if len(patterns) > 1:
+                print("\t0 file(s) moved.", file=out)
             ctx.error_level = 1
+            ctx.piped = False
             return
 
-        if file_from_abs == file_to_abs:
-            continue
-        move(file_from_abs, file_to_abs)
+        # move *.py newfile = fail
+        if len(patterns) > 1:
+            print(MULTI_TO_SINGLE, file=sys.stderr)
+            ctx.error_level = 1
+            ctx.piped = False
+            return
+
+        # move singlefile newname
+        rename(patterns[0], dest)
         ctx.error_level = 0
         ctx.piped = False
+        return
+
+    patterns = glob(source)
+    if len(patterns) > 1 and dest_isdir:
+        pass_all = False
+        for src in patterns:
+            new_name = join(dest, _basename(src))
+            if not exists(new_name):
+                move(src, dest)
+                continue
+            if not pass_all and not suppress:
+                answer = input(f"Overwrite {new_name}? (Yes/No/All)")
+                answer = answer.lower()[:3]
+                if "all" in answer:
+                    pass_all = True
+                if not pass_all and "yes" not in answer:
+                    continue
+            rename(abspath(src), new_name)
+        ctx.error_level = 0
+        ctx.piped = False
+        return
 
 
 @what_func
@@ -739,6 +807,7 @@ def cmd_del(params: List[Argument], ctx: Context) -> None:
 
     out = get_output(ctx=ctx)
     params = _expand_params(params=params, ctx=ctx)
+    params = [param.replace("\\", "/") for param in params]
     params_len = len(params)
 
     if not params_len:
@@ -833,6 +902,7 @@ def cmd_mkdir(params: List[Argument], ctx: Context) -> None:
         dir_path = abspath(first)
         try:
             makedirs(dir_path)
+            ctx.error_level = 0
         except FileExistsError:
             print(PATH_EXISTS.format(first), file=sys.stderr)
             ctx.error_level = 1
